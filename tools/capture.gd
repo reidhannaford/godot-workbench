@@ -49,9 +49,10 @@ func _run() -> void:
 		return
 	var popup := menu.get_popup()
 	# Item ids match plugin.gd's Item enum: 0 studio, 1 matcap, 2 flat,
-	# 3 texture, 4 cavity, 5 outline, 7 x-ray, 8 crease lines; a bundled matcap
-	# is picked by its label in the submenu. Cavity, outline, crease and x-ray are toggles and are
-	# remembered in editor settings, so they are set to a wanted state.
+	# 3 texture, 4 cavity, 5 outline, 7 x-ray, 8 crease lines, 9 wireframe; a
+	# bundled matcap is picked by its label in the submenu. Cavity, outline,
+	# crease, x-ray and wireframe are toggles and are remembered in editor
+	# settings, so they are set to a wanted state.
 	var sequence: Array[Array] = [
 		["studio", [0, 2], true],
 		["studio_texture", [3], true],
@@ -69,12 +70,27 @@ func _run() -> void:
 		_set_checked(popup, 8, step[2] as bool)
 		await _settle()
 		_shot(step[0] as String)
-	popup.id_pressed.emit(0)
+	# Picking a bundled matcap switches to MatCap, so Clay goes back first and
+	# studio lighting after it.
 	_pick_matcap(popup, "Clay")
+	popup.id_pressed.emit(0)
 	_set_checked(popup, 7, true)
 	await _settle()
 	_shot("studio_xray")
+	_set_checked(popup, 9, true)
+	await _settle()
+	_shot("studio_xray_wireframe")
 	_set_checked(popup, 7, false)
+	await _settle()
+	_shot("studio_wireframe")
+	# The angle threshold through Editor Settings, which the plugin applies at
+	# once: hides the diagonals across the flat faces.
+	var editor_settings := EditorInterface.get_editor_settings()
+	editor_settings.set_setting("workbench/wireframe_threshold", 30.0)
+	await _settle()
+	_shot("studio_wireframe_threshold")
+	editor_settings.set_setting("workbench/wireframe_threshold", 0.0)
+	_set_checked(popup, 9, false)
 	_set_view_item("Orthogonal")
 	await _settle()
 	_shot("studio_ortho")

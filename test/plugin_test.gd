@@ -6,6 +6,7 @@ extends SceneTree
 
 const WorkbenchController := preload("res://addons/workbench/workbench_controller.gd")
 const WorkbenchSettings := preload("res://addons/workbench/workbench_settings.gd")
+const WorkbenchEffect := preload("res://addons/workbench/workbench_effect.gd")
 
 var _failures: int = 0
 
@@ -72,7 +73,7 @@ func _run() -> void:
 			_check(ghost_camera.global_transform.is_equal_approx(camera.global_transform), "the hidden camera copies the editor camera")
 			_check(ghost_camera.cull_mask & ~WorkbenchController.GAME_LAYERS == 0, "the hidden camera leaves out the gizmo layers")
 			_check(ghost_camera.environment == controller.environment, "the hidden camera has the neutral environment")
-		var own_effect := camera.compositor.compositor_effects[0]
+		var own_effect := camera.compositor.compositor_effects[0] as WorkbenchEffect
 		_check(own_effect.xray > 0.0, "the effect gets the x-ray opacity")
 		_check(own_effect.outline_width >= 1.0, "the effect gets an outline width of at least a pixel")
 		_check(own_effect.xray_texture == RenderingServer.viewport_get_texture(ghost.get_viewport_rid()), "the effect gets the hidden viewport's texture")
@@ -80,6 +81,35 @@ func _run() -> void:
 	controller.xray = false
 	controller.before_draw()
 	_check(ghost == null or ghost.is_queued_for_deletion(), "turning x-ray off removes the hidden viewport")
+	controller.after_draw()
+
+	controller.wireframe = true
+	controller.before_draw()
+	var wire := viewport.find_child(WorkbenchController.WIREFRAME_VIEWPORT_NAME, false, false) as SubViewport
+	_check(wire != null, "wireframe adds a hidden viewport under the editor viewport")
+	if wire != null:
+		_check(wire.debug_draw == Viewport.DEBUG_DRAW_WIREFRAME, "the hidden viewport draws wireframe")
+		_check(wire.use_hdr_2d, "the hidden wireframe viewport renders in HDR")
+		var wire_camera := wire.get_camera_3d()
+		_check(wire_camera != null, "the hidden wireframe viewport has a camera")
+		if wire_camera != null:
+			_check(wire_camera.global_transform.is_equal_approx(camera.global_transform), "the hidden wireframe camera copies the editor camera")
+			_check(wire_camera.cull_mask & ~WorkbenchController.GAME_LAYERS == 0, "the hidden wireframe camera leaves out the gizmo layers")
+			var export_effect: WorkbenchEffect = null
+			if wire_camera.compositor != null and wire_camera.compositor.compositor_effects.size() == 1:
+				export_effect = wire_camera.compositor.compositor_effects[0] as WorkbenchEffect
+			_check(export_effect != null, "the hidden wireframe camera has a compositor with one effect")
+			if export_effect != null:
+				_check(export_effect.depth_export, "that effect exports depth")
+				_check(not export_effect.needs_normal_roughness, "the depth export doesn't ask for the normal buffer")
+		var own_effect := camera.compositor.compositor_effects[0] as WorkbenchEffect
+		_check(own_effect.wireframe > 0.0, "the effect gets the wireframe opacity")
+		_check(own_effect.wireframe_texture == RenderingServer.viewport_get_texture(wire.get_viewport_rid()), "the effect gets the wireframe viewport's texture")
+		_check(viewport.find_child(WorkbenchController.XRAY_VIEWPORT_NAME, false, false) == null or (viewport.find_child(WorkbenchController.XRAY_VIEWPORT_NAME, false, false) as Node).is_queued_for_deletion(), "wireframe alone adds no x-ray viewport")
+	controller.after_draw()
+	controller.wireframe = false
+	controller.before_draw()
+	_check(wire == null or wire.is_queued_for_deletion(), "turning wireframe off removes the hidden viewport")
 	controller.after_draw()
 
 	controller.before_draw()
@@ -112,6 +142,37 @@ func _run() -> void:
 	var settings := EditorInterface.get_editor_settings()
 	_check(settings.has_shortcut("workbench/toggle"), "the shortcut is registered")
 	_check(settings.has_shortcut("workbench/toggle_xray"), "the x-ray shortcut is registered")
+	_check(settings.has_shortcut("workbench/toggle_wireframe"), "the wireframe shortcut is registered")
+	_check(settings.has_setting("workbench/wireframe") and settings.has_setting("workbench/wireframe_opacity") and settings.has_setting("workbench/wireframe_threshold"), "the wireframe settings are registered")
+	var menu := EditorInterface.get_base_control().find_child("WorkbenchMenu", true, false) as MenuButton
+	_check(menu != null and menu.get_popup().get_item_index(9) >= 0 and menu.get_popup().get_item_text(menu.get_popup().get_item_index(9)) == "Wireframe", "the options menu has a Wireframe item")
+	if menu != null:
+		var popup := menu.get_popup()
+		_check(popup.get_item_index(10) >= 0 and popup.get_item_text(popup.get_item_index(10)) == "Wireframe Options…", "the options menu has a Wireframe Options… item")
+		popup.id_pressed.emit(10)
+		await process_frame
+		var panel := EditorInterface.get_base_control().find_child("WorkbenchWireframeOptions", true, false) as PopupPanel
+		_check(panel != null, "Wireframe Options… opens a panel")
+		if panel != null:
+			var sliders := panel.find_children("*", "HSlider", true, false)
+			_check(sliders.size() == 2, "the panel has two sliders")
+			if sliders.size() == 2:
+				var opacity_slider := sliders[0] as HSlider
+				var threshold_slider := sliders[1] as HSlider
+				_check(is_equal_approx(opacity_slider.value, settings.get_setting("workbench/wireframe_opacity")), "the opacity slider shows the setting")
+				threshold_slider.value = 30.0
+				_check(is_equal_approx(settings.get_setting("workbench/wireframe_threshold"), 30.0), "moving the threshold slider writes the setting")
+				settings.set_setting("workbench/wireframe_threshold", 45.0)
+				await process_frame
+				_check(is_equal_approx(threshold_slider.value, 45.0), "an Editor Settings edit moves the slider")
+				settings.set_setting("workbench/wireframe_threshold", 0.0)
+				settings.set_setting("workbench/matcap", "res://addons/workbench/matcaps/normal.png")
+				settings.set_setting("workbench/shading", 0)
+				await process_frame
+				var submenu := EditorInterface.get_base_control().find_child("WorkbenchMatcaps", true, false) as PopupMenu
+				submenu.id_pressed.emit(100)
+				_check(settings.get_setting("workbench/matcap") == "res://addons/workbench/matcaps/clay.png" and settings.get_setting("workbench/shading") == 1, "picking a matcap while in studio lighting keeps both the matcap and the shading")
+			panel.hide()
 
 	print("FAILURES %d" % _failures)
 	quit(0 if _failures == 0 else 1)

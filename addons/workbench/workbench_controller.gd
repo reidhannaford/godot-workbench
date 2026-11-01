@@ -26,6 +26,13 @@ extends RefCounted
 ## depth, as a fixed amount of green on black. A child viewport renders before
 ## its parent in the same frame, so the count of surfaces under each pixel is
 ## current when the effect blends it in.
+##
+## Wireframe needs the mesh edges, which no screen-space buffer knows. It
+## gets a hidden viewport of the same kind in the editor's Wireframe debug
+## draw, which rasterizes every mesh as lines with real depth, and a
+## depth-exporting effect on that viewport's camera writes the edge pixels and
+## their depth into its colour buffer, for the main effect to depth-test
+## against the solid surfaces.
 
 const WorkbenchEffect := preload("workbench_effect.gd")
 const VIEWPORT_COUNT := 4
@@ -35,6 +42,7 @@ const BACKGROUND := Color(0.24, 0.24, 0.24)
 ## grid and tool layers above; the x-ray camera only wants the game's.
 const GAME_LAYERS := (1 << 20) - 1
 const XRAY_VIEWPORT_NAME := "WorkbenchXray"
+const WIREFRAME_VIEWPORT_NAME := "WorkbenchWireframe"
 
 ## The options, read by every viewport's own effect before each draw.
 var effect: WorkbenchEffect
@@ -57,11 +65,19 @@ var texture_color: bool = false:
 var xray: bool = false
 ## How opaque the front surface is in x-ray.
 var xray_alpha: float = 0.5
+## Line every mesh edge, as Blender's Wireframe overlay does.
+var wireframe: bool = false
+## How dark the wireframe lines are.
+var wireframe_opacity: float = 1.0
+## Only line the edges where the surfaces either side differ by at least this
+## many degrees; 0 lines every edge, as Blender's threshold of 1 does.
+var wireframe_threshold: float = 0.0
 
 ## Per viewport taken over: its camera, its own effect and compositor, the
 ## MSAA it had, during a draw the environment, attributes, compositor and
-## debug draw it had before the draw, and in x-ray its hidden viewport and
-## camera.
+## debug draw it had before the draw, and in x-ray and wireframe their hidden
+## viewports and cameras, under "xray_viewport", "xray_camera",
+## "wire_viewport" and "wire_camera".
 var _entries: Array[Dictionary] = []
 ## True between [method before_draw] and [method after_draw].
 var _drawing: bool = false
@@ -98,14 +114,24 @@ func before_draw() -> void:
 		var own_effect := entry["effect"] as WorkbenchEffect
 		_copy_options(own_effect)
 		if xray:
-			_ensure_xray(entry)
-			_sync_xray(entry)
+			_ensure_ghost(entry, "xray", XRAY_VIEWPORT_NAME, Viewport.DEBUG_DRAW_OVERDRAW, false)
+			_sync_ghost(entry, "xray")
 			own_effect.xray = xray_alpha
 			own_effect.xray_texture = RenderingServer.viewport_get_texture((entry["xray_viewport"] as SubViewport).get_viewport_rid())
 		else:
-			_free_xray(entry)
+			_free_ghost(entry, "xray")
 			own_effect.xray = 0.0
 			own_effect.xray_texture = RID()
+		if wireframe:
+			_ensure_ghost(entry, "wire", WIREFRAME_VIEWPORT_NAME, Viewport.DEBUG_DRAW_WIREFRAME, true)
+			_sync_ghost(entry, "wire")
+			own_effect.wireframe = wireframe_opacity
+			own_effect.wireframe_threshold = wireframe_threshold
+			own_effect.wireframe_texture = RenderingServer.viewport_get_texture((entry["wire_viewport"] as SubViewport).get_viewport_rid())
+		else:
+			_free_ghost(entry, "wire")
+			own_effect.wireframe = 0.0
+			own_effect.wireframe_texture = RID()
 		entry["environment"] = camera.environment
 		entry["attributes"] = camera.attributes
 		entry["compositor"] = camera.compositor
@@ -171,7 +197,8 @@ func _restore() -> void:
 		RenderingServer.frame_post_draw.disconnect(after_draw)
 	after_draw()
 	for entry: Dictionary in _entries:
-		_free_xray(entry)
+		_free_ghost(entry, "xray")
+		_free_ghost(entry, "wire")
 		var viewport := entry["viewport"] as SubViewport
 		if is_instance_valid(viewport) and viewport.msaa_3d == Viewport.MSAA_DISABLED:
 			viewport.msaa_3d = entry["msaa_3d"] as Viewport.MSAA
@@ -190,21 +217,24 @@ func _copy_options(own_effect: WorkbenchEffect) -> void:
 	own_effect.matcap = effect.matcap
 
 
-## Adds the hidden overdraw viewport under this editor viewport, if it isn't
-## there yet. As a child, it shares the editor viewport's world and renders
-## before it.
-func _ensure_xray(entry: Dictionary) -> void:
-	if entry.has("xray_viewport") and is_instance_valid(entry["xray_viewport"]):
+## Adds a hidden viewport in the given debug draw under this editor viewport,
+## if it isn't there yet. As a child, it shares the editor viewport's world
+## and renders before it. With [param export_depth], its camera gets a
+## compositor whose effect writes the depth of what it drew into its colour.
+func _ensure_ghost(entry: Dictionary, key: String, ghost_name: String, debug_draw: Viewport.DebugDraw, export_depth: bool) -> void:
+	var viewport_key := key + "_viewport"
+	if entry.has(viewport_key) and is_instance_valid(entry[viewport_key]):
 		return
 	var viewport := entry["viewport"] as SubViewport
 	var ghost := SubViewport.new()
-	ghost.name = XRAY_VIEWPORT_NAME
-	ghost.debug_draw = Viewport.DEBUG_DRAW_OVERDRAW
+	ghost.name = ghost_name
+	ghost.debug_draw = debug_draw
 	ghost.msaa_3d = Viewport.MSAA_DISABLED
 	ghost.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
 	ghost.use_taa = false
 	ghost.use_debanding = false
-	# Keeps the render linear, so the shader reads the overdraw's green as is.
+	# Keeps the render linear, so the shader reads the overdraw's green, or
+	# the exported depth, as is.
 	ghost.use_hdr_2d = true
 	ghost.positional_shadow_atlas_size = 0
 	ghost.gui_disable_input = true
@@ -214,18 +244,24 @@ func _ensure_xray(entry: Dictionary) -> void:
 	ghost_camera.environment = environment
 	ghost_camera.attributes = attributes
 	ghost_camera.physics_interpolation_mode = Node.PHYSICS_INTERPOLATION_MODE_OFF
+	if export_depth:
+		var export_effect := WorkbenchEffect.new()
+		export_effect.depth_export = true
+		var export_compositor := Compositor.new()
+		export_compositor.compositor_effects = [export_effect]
+		ghost_camera.compositor = export_compositor
 	ghost.add_child(ghost_camera)
 	viewport.add_child(ghost)
-	entry["xray_viewport"] = ghost
-	entry["xray_camera"] = ghost_camera
+	entry[viewport_key] = ghost
+	entry[key + "_camera"] = ghost_camera
 
 
 ## Matches the hidden viewport and its camera to the editor's for this draw.
-func _sync_xray(entry: Dictionary) -> void:
+func _sync_ghost(entry: Dictionary, key: String) -> void:
 	var viewport := entry["viewport"] as SubViewport
 	var camera := entry["camera"] as Camera3D
-	var ghost := entry["xray_viewport"] as SubViewport
-	var ghost_camera := entry["xray_camera"] as Camera3D
+	var ghost := entry[key + "_viewport"] as SubViewport
+	var ghost_camera := entry[key + "_camera"] as Camera3D
 	if ghost.size != viewport.size:
 		ghost.size = viewport.size
 	ghost_camera.global_transform = camera.global_transform
@@ -241,11 +277,12 @@ func _sync_xray(entry: Dictionary) -> void:
 	ghost_camera.cull_mask = camera.cull_mask & GAME_LAYERS
 
 
-func _free_xray(entry: Dictionary) -> void:
-	if not entry.has("xray_viewport"):
+func _free_ghost(entry: Dictionary, key: String) -> void:
+	var viewport_key := key + "_viewport"
+	if not entry.has(viewport_key):
 		return
-	var ghost := entry["xray_viewport"] as SubViewport
+	var ghost := entry[viewport_key] as SubViewport
 	if is_instance_valid(ghost):
 		ghost.queue_free()
-	entry.erase("xray_viewport")
-	entry.erase("xray_camera")
+	entry.erase(viewport_key)
+	entry.erase(key + "_camera")

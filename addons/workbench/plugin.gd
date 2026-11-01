@@ -1,8 +1,9 @@
 @tool
 extends EditorPlugin
 ## Adds a Workbench toggle and its options menu to the 3D editor toolbar, and a
-## shortcut (workbench/toggle, Alt+Z by default) to flip it, and another
-## (workbench/toggle_xray, Alt+Shift+Z) for x-ray.
+## shortcut (workbench/toggle, Alt+Z by default) to flip it, and others for
+## x-ray (workbench/toggle_xray, Alt+Shift+Z) and wireframe
+## (workbench/toggle_wireframe, Alt+Shift+W).
 
 const WorkbenchController := preload("workbench_controller.gd")
 const WorkbenchSettings := preload("workbench_settings.gd")
@@ -10,8 +11,9 @@ const WorkbenchEffect := preload("workbench_effect.gd")
 
 const SHORTCUT_PATH := "workbench/toggle"
 const XRAY_SHORTCUT_PATH := "workbench/toggle_xray"
+const WIREFRAME_SHORTCUT_PATH := "workbench/toggle_wireframe"
 
-enum Item { STUDIO, MATCAP, FLAT, TEXTURE, CAVITY, OUTLINE, CHOOSE_MATCAP, XRAY, CREASE }
+enum Item { STUDIO, MATCAP, FLAT, TEXTURE, CAVITY, OUTLINE, CHOOSE_MATCAP, XRAY, CREASE, WIREFRAME, WIREFRAME_OPTIONS }
 ## Ids of the bundled matcaps in their submenu: this plus their index.
 const MATCAP_ID_BASE := 100
 
@@ -22,6 +24,15 @@ var _toggle: Button
 var _menu: MenuButton
 var _matcap_menu: PopupMenu
 var _file_dialog: EditorFileDialog
+## The Wireframe Options… panel: opacity and angle threshold sliders, like
+## the ones in Blender's overlay popover. A PopupMenu can't hold sliders.
+var _wireframe_panel: PopupPanel
+var _opacity_slider: HSlider
+var _threshold_slider: HSlider
+## True while [method _save_settings] writes: EditorSettings emits
+## settings_changed from inside each set_setting, and reloading the settings
+## half-way through a save would overwrite the values not yet written.
+var _saving: bool = false
 
 
 func _enter_tree() -> void:
@@ -77,6 +88,11 @@ func _exit_tree() -> void:
 	if _file_dialog != null:
 		_file_dialog.queue_free()
 	_file_dialog = null
+	if _wireframe_panel != null:
+		_wireframe_panel.queue_free()
+	_wireframe_panel = null
+	_opacity_slider = null
+	_threshold_slider = null
 	_controller = null
 
 
@@ -93,20 +109,27 @@ func _forward_3d_gui_input(_viewport_camera: Camera3D, event: InputEvent) -> int
 		if _settings.xray and not _toggle.button_pressed:
 			_toggle.button_pressed = true
 		return AFTER_GUI_INPUT_STOP
+	if settings.has_shortcut(WIREFRAME_SHORTCUT_PATH) and settings.get_shortcut(WIREFRAME_SHORTCUT_PATH).matches_event(event):
+		_on_menu_pressed(Item.WIREFRAME)
+		if _settings.wireframe and not _toggle.button_pressed:
+			_toggle.button_pressed = true
+		return AFTER_GUI_INPUT_STOP
 	return AFTER_GUI_INPUT_PASS
 
 
 func _register_shortcuts() -> void:
-	_register_shortcut(SHORTCUT_PATH, "Toggle Workbench", false)
-	_register_shortcut(XRAY_SHORTCUT_PATH, "Toggle Workbench X-Ray", true)
+	_register_shortcut(SHORTCUT_PATH, "Toggle Workbench", KEY_Z, false)
+	_register_shortcut(XRAY_SHORTCUT_PATH, "Toggle Workbench X-Ray", KEY_Z, true)
+	# Blender's Shift+Z is the editor's "lock to XY plane"; W is free with Alt+Shift.
+	_register_shortcut(WIREFRAME_SHORTCUT_PATH, "Toggle Workbench Wireframe", KEY_W, true)
 
 
-func _register_shortcut(path: String, label: String, shift: bool) -> void:
+func _register_shortcut(path: String, label: String, keycode: Key, shift: bool) -> void:
 	var settings := EditorInterface.get_editor_settings()
 	if settings.has_shortcut(path):
 		return
 	var key := InputEventKey.new()
-	key.keycode = KEY_Z
+	key.keycode = keycode
 	key.alt_pressed = true
 	key.shift_pressed = shift
 	var shortcut := Shortcut.new()
@@ -127,14 +150,18 @@ func _apply_settings() -> void:
 	_controller.texture_color = _settings.texture_color
 	_controller.xray = _settings.xray
 	_controller.xray_alpha = _settings.xray_alpha
+	_controller.wireframe = _settings.wireframe
+	_controller.wireframe_opacity = _settings.wireframe_opacity
+	_controller.wireframe_threshold = _settings.wireframe_threshold
 
 
 func _on_settings_changed() -> void:
-	if _settings == null or _controller == null or _menu == null:
+	if _saving or _settings == null or _controller == null or _menu == null:
 		return
 	_settings.load()
 	_apply_settings()
 	_sync_menu()
+	_sync_wireframe_panel()
 	_update_tooltip()
 
 
@@ -153,6 +180,8 @@ func _build_menu() -> void:
 	popup.add_check_item("Cavity", Item.CAVITY)
 	popup.add_check_item("Outline", Item.OUTLINE)
 	popup.add_check_item("Crease Lines", Item.CREASE)
+	popup.add_check_item("Wireframe", Item.WIREFRAME)
+	popup.add_item("Wireframe Options…", Item.WIREFRAME_OPTIONS)
 	popup.add_separator()
 	popup.add_check_item("X-Ray", Item.XRAY)
 	popup.add_separator()
@@ -179,6 +208,7 @@ func _sync_menu() -> void:
 	popup.set_item_checked(popup.get_item_index(Item.OUTLINE), _settings.outline)
 	popup.set_item_checked(popup.get_item_index(Item.CREASE), _settings.crease)
 	popup.set_item_disabled(popup.get_item_index(Item.CREASE), not _settings.outline)
+	popup.set_item_checked(popup.get_item_index(Item.WIREFRAME), _settings.wireframe)
 	popup.set_item_checked(popup.get_item_index(Item.XRAY), _settings.xray)
 	var index := 0
 	for label: String in WorkbenchSettings.BUNDLED_MATCAPS:
@@ -204,10 +234,15 @@ func _on_menu_pressed(id: int) -> void:
 			_settings.crease = not _settings.crease
 		Item.XRAY:
 			_settings.xray = not _settings.xray
+		Item.WIREFRAME:
+			_settings.wireframe = not _settings.wireframe
 		Item.CHOOSE_MATCAP:
 			_choose_matcap()
 			return
-	_settings.save()
+		Item.WIREFRAME_OPTIONS:
+			_show_wireframe_options()
+			return
+	_save_settings()
 	_apply_settings()
 	_sync_menu()
 	_update_tooltip()
@@ -220,10 +255,87 @@ func _on_matcap_menu_pressed(id: int) -> void:
 		return
 	_settings.matcap_path = WorkbenchSettings.BUNDLED_MATCAPS[labels[index] as String]
 	_settings.shading = WorkbenchEffect.Shading.MATCAP
-	_settings.save()
+	_save_settings()
 	_apply_settings()
 	_sync_menu()
 	_update_tooltip()
+
+
+## Writes the settings without the editor's settings_changed reloading them
+## half-way through.
+func _save_settings() -> void:
+	_saving = true
+	_settings.save()
+	_saving = false
+
+
+## Opens the slider panel under the options menu.
+func _show_wireframe_options() -> void:
+	if _wireframe_panel == null:
+		_wireframe_panel = PopupPanel.new()
+		_wireframe_panel.name = "WorkbenchWireframeOptions"
+		var box := VBoxContainer.new()
+		_wireframe_panel.add_child(box)
+		_opacity_slider = _add_slider(box, "Opacity", 0.1, 1.0, 0.05, _on_opacity_slider)
+		_threshold_slider = _add_slider(box, "Threshold", 0.0, 90.0, 1.0, _on_threshold_slider, "°")
+		_threshold_slider.tooltip_text = "Only line the edges where the surfaces either side meet at this angle or more. 0 lines every edge, and hides nothing."
+		EditorInterface.get_base_control().add_child(_wireframe_panel)
+	_sync_wireframe_panel()
+	var scale := EditorInterface.get_editor_scale()
+	var position := Vector2i(_menu.get_screen_position() + Vector2(0.0, _menu.size.y))
+	_wireframe_panel.popup(Rect2i(position, Vector2i(Vector2(280.0, 0.0) * scale)))
+
+
+## A labelled slider row with its value shown beside it; [param changed]
+## gets the new value.
+func _add_slider(box: VBoxContainer, label: String, minimum: float, maximum: float, step: float, changed: Callable, suffix: String = "") -> HSlider:
+	var scale := EditorInterface.get_editor_scale()
+	var row := HBoxContainer.new()
+	var name_label := Label.new()
+	name_label.text = label
+	name_label.custom_minimum_size.x = 72.0 * scale
+	row.add_child(name_label)
+	var slider := HSlider.new()
+	slider.min_value = minimum
+	slider.max_value = maximum
+	slider.step = step
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	slider.focus_mode = Control.FOCUS_NONE
+	row.add_child(slider)
+	var value_label := Label.new()
+	value_label.custom_minimum_size.x = 40.0 * scale
+	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	row.add_child(value_label)
+	var show_value := func(value: float) -> void:
+		value_label.text = ("%d%s" % [int(round(value)), suffix]) if step >= 1.0 else ("%.2f%s" % [value, suffix])
+	slider.value_changed.connect(show_value)
+	slider.value_changed.connect(changed)
+	slider.set_meta(&"show_value", show_value)
+	box.add_child(row)
+	return slider
+
+
+## Puts the settings on the sliders without their signals writing them back.
+func _sync_wireframe_panel() -> void:
+	if _wireframe_panel == null:
+		return
+	for pair: Array in [[_opacity_slider, _settings.wireframe_opacity], [_threshold_slider, _settings.wireframe_threshold]]:
+		var slider := pair[0] as HSlider
+		slider.set_value_no_signal(pair[1] as float)
+		(slider.get_meta(&"show_value") as Callable).call(slider.value)
+
+
+func _on_opacity_slider(value: float) -> void:
+	_settings.wireframe_opacity = value
+	_save_settings()
+	_apply_settings()
+
+
+func _on_threshold_slider(value: float) -> void:
+	_settings.wireframe_threshold = value
+	_save_settings()
+	_apply_settings()
 
 
 func _choose_matcap() -> void:
@@ -242,7 +354,7 @@ func _choose_matcap() -> void:
 func _on_matcap_chosen(path: String) -> void:
 	_settings.matcap_path = path
 	_settings.shading = WorkbenchEffect.Shading.MATCAP
-	_settings.save()
+	_save_settings()
 	_apply_settings()
 	_sync_menu()
 	_update_tooltip()
@@ -257,4 +369,7 @@ func _update_tooltip() -> void:
 	var xray_text := ""
 	if settings.has_shortcut(XRAY_SHORTCUT_PATH):
 		xray_text = "\nX-ray: %s (%s)." % ["on" if _settings.xray else "off", settings.get_shortcut(XRAY_SHORTCUT_PATH).get_as_text()]
-	_toggle.tooltip_text = "Workbench%s\n%s, %s colour.%s" % [shortcut_text, mode, "texture" if _settings.texture_color else "flat", xray_text]
+	var wireframe_text := ""
+	if settings.has_shortcut(WIREFRAME_SHORTCUT_PATH):
+		wireframe_text = "\nWireframe: %s (%s)." % ["on" if _settings.wireframe else "off", settings.get_shortcut(WIREFRAME_SHORTCUT_PATH).get_as_text()]
+	_toggle.tooltip_text = "Workbench%s\n%s, %s colour.%s%s" % [shortcut_text, mode, "texture" if _settings.texture_color else "flat", xray_text, wireframe_text]

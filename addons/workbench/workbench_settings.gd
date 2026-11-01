@@ -26,6 +26,10 @@ var outline_width: float = 1.0
 var crease: bool = true
 var xray: bool = false
 var xray_alpha: float = 0.5
+var wireframe: bool = false
+var wireframe_opacity: float = 1.0
+## Degrees; 0 lines every edge.
+var wireframe_threshold: float = 0.0
 var matcap_path: String = DEFAULT_MATCAP
 
 
@@ -39,6 +43,9 @@ func load() -> void:
 	crease = _read(settings, "crease", crease, TYPE_BOOL)
 	xray = _read(settings, "xray", xray, TYPE_BOOL)
 	xray_alpha = _read(settings, "xray_alpha", xray_alpha, TYPE_FLOAT, PROPERTY_HINT_RANGE, "0.05,0.95,0.05")
+	wireframe = _read(settings, "wireframe", wireframe, TYPE_BOOL)
+	wireframe_opacity = _read(settings, "wireframe_opacity", wireframe_opacity, TYPE_FLOAT, PROPERTY_HINT_RANGE, "0.1,1,0.05")
+	wireframe_threshold = _read(settings, "wireframe_threshold", wireframe_threshold, TYPE_FLOAT, PROPERTY_HINT_RANGE, "0,90,1")
 	matcap_path = _read(settings, "matcap", matcap_path, TYPE_STRING, PROPERTY_HINT_FILE, "*.png,*.jpg,*.jpeg,*.exr,*.webp")
 
 
@@ -52,6 +59,9 @@ func save() -> void:
 	settings.set_setting(PREFIX + "crease", crease)
 	settings.set_setting(PREFIX + "xray", xray)
 	settings.set_setting(PREFIX + "xray_alpha", xray_alpha)
+	settings.set_setting(PREFIX + "wireframe", wireframe)
+	settings.set_setting(PREFIX + "wireframe_opacity", wireframe_opacity)
+	settings.set_setting(PREFIX + "wireframe_threshold", wireframe_threshold)
 	settings.set_setting(PREFIX + "matcap", matcap_path)
 
 

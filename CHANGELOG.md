@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Wireframe**: a line along every mesh edge, as Blender's Wireframe overlay draws, in the options menu and on Alt+Shift+W by default (`workbench/toggle_wireframe`). **Wireframe Options…** opens Blender's two sliders: the lines' opacity, and an angle threshold that keeps only the edges where the surfaces either side meet at that angle or more, so the diagonals across flat quads go first; both are also `workbench/wireframe_opacity` and `workbench/wireframe_threshold` in Editor Settings. The width follows `workbench/outline_width`. Only the edges in front are drawn. The edges come from a second hidden render per editor viewport, in the editor's Wireframe debug draw, whose depth is exported and tested against the solid surfaces; with X-ray on, the hidden edges show through as much as the front surface does. Godot draws every triangle edge, so quads show their diagonals.
+- Fixed: changing two options in one go, such as picking a bundled matcap while in studio lighting, could lose one of them. The editor reports each setting as it is written, and the plugin reloaded all of them half-way through its own save, so a value not yet written overwrote the new one. The capture's x-ray and orthographic shots were being taken in the Contrast matcap because of it.
+
 ## 1.3.1, 2026-10-29
 
 - The release ZIP for the Asset Store holds only `addons/workbench/`, which already carries its own licence and README. The root README, LICENSE and CHANGELOG are no longer at the ZIP's root, where they were ambiguous and collided when several addons were installed into one project. No change to the addon itself.

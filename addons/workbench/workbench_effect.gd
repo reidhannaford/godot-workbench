@@ -6,12 +6,17 @@ extends CompositorEffect
 ## cameras by the controller; the viewport must draw with MSAA off, because
 ## the opaque colour is only resolved after the transparent pass and a
 ## post-opaque write to the resolved buffer would be lost.
+##
+## With [member depth_export] on, the same shader instead copies the depth of
+## whatever was drawn into the colour buffer. The controller puts one such
+## effect on the hidden wireframe viewport's camera, so the main effect can
+## depth-test the mesh edges against the solid surfaces.
 
 enum Shading { STUDIO, MATCAP }
 
 const SHADER_FILE_NAME := "workbench.glsl"
 const WORKGROUP := 8
-const PUSH_CONSTANT_FLOATS := 20
+const PUSH_CONSTANT_FLOATS := 24
 
 var shading: Shading = Shading.STUDIO
 ## Multiply the shading by the albedo in the colour buffer. Only meaningful
@@ -33,6 +38,20 @@ var xray: float = 0.0
 ## The overdraw render of the same view, as a RenderingServer texture: each
 ## surface under a pixel adds 0.08 of green. Only read while [member xray] is on.
 var xray_texture: RID
+## Opacity of the mesh edge lines; 0 is off.
+var wireframe: float = 0.0
+## Only line the mesh edges where the surfaces either side differ by at least
+## this many degrees; 0 lines every edge.
+var wireframe_threshold: float = 0.0
+## The wireframe render of the same view, as a RenderingServer texture, after
+## a depth-exporting effect marked the edge pixels and stored their depth.
+## Only read while [member wireframe] is on.
+var wireframe_texture: RID
+## Export the depth instead of shading. The normal buffer isn't needed then.
+var depth_export: bool = false:
+	set(value):
+		depth_export = value
+		needs_normal_roughness = not value
 
 var _rd: RenderingDevice
 var _shader_file: RDShaderFile
@@ -83,7 +102,8 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 	var size := buffers.get_internal_size()
 	if size.x == 0 or size.y == 0:
 		return
-	if not buffers.has_texture(&"forward_clustered", &"normal_roughness"):
+	var has_normals := buffers.has_texture(&"forward_clustered", &"normal_roughness")
+	if not has_normals and not depth_export:
 		return
 
 	var projection := p_render_data.get_render_scene_data().get_cam_projection()
@@ -111,18 +131,28 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 	push_constant[17] = background_color.g
 	push_constant[18] = background_color.b
 	push_constant[19] = 1.0
+	push_constant[20] = wireframe
+	push_constant[21] = 1.0 if depth_export else 0.0
+	# Above 1 no dot product is below it, so every edge is lined.
+	push_constant[22] = cos(deg_to_rad(wireframe_threshold)) if wireframe_threshold > 0.0 else 2.0
+	push_constant[23] = 0.0
 
 	var matcap_rid := _matcap_rd_texture()
 	var xray_rid := _xray_rd_texture()
+	var wireframe_rid := _wireframe_rd_texture()
 	var groups_x := (size.x - 1) / WORKGROUP + 1
 	var groups_y := (size.y - 1) / WORKGROUP + 1
 
 	for view: int in buffers.get_view_count():
 		var color_set := UniformSetCacheRD.get_cache(_shader, 0, [_image_uniform(buffers.get_color_layer(view))])
 		var depth_set := UniformSetCacheRD.get_cache(_shader, 1, [_sampler_uniform(_nearest_sampler, buffers.get_depth_layer(view))])
-		var normal_set := UniformSetCacheRD.get_cache(_shader, 2, [_sampler_uniform(_nearest_sampler, buffers.get_texture(&"forward_clustered", &"normal_roughness"))])
+		# The depth export never reads normals; the depth stands in for the
+		# buffer the wireframe viewport doesn't have.
+		var normal_rid := buffers.get_texture(&"forward_clustered", &"normal_roughness") if has_normals else buffers.get_depth_layer(view)
+		var normal_set := UniformSetCacheRD.get_cache(_shader, 2, [_sampler_uniform(_nearest_sampler, normal_rid)])
 		var matcap_set := UniformSetCacheRD.get_cache(_shader, 3, [_sampler_uniform(_linear_sampler, matcap_rid)])
 		var xray_set := UniformSetCacheRD.get_cache(_shader, 4, [_sampler_uniform(_linear_sampler, xray_rid)])
+		var wireframe_set := UniformSetCacheRD.get_cache(_shader, 5, [_sampler_uniform(_nearest_sampler, wireframe_rid)])
 
 		var compute_list := _rd.compute_list_begin()
 		_rd.compute_list_bind_compute_pipeline(compute_list, _pipeline)
@@ -131,6 +161,7 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 		_rd.compute_list_bind_uniform_set(compute_list, normal_set, 2)
 		_rd.compute_list_bind_uniform_set(compute_list, matcap_set, 3)
 		_rd.compute_list_bind_uniform_set(compute_list, xray_set, 4)
+		_rd.compute_list_bind_uniform_set(compute_list, wireframe_set, 5)
 		_rd.compute_list_set_push_constant(compute_list, push_constant.to_byte_array(), PUSH_CONSTANT_FLOATS * 4)
 		_rd.compute_list_dispatch(compute_list, groups_x, groups_y, 1)
 		_rd.compute_list_end()
@@ -193,6 +224,17 @@ func _matcap_rd_texture() -> RID:
 func _xray_rd_texture() -> RID:
 	if xray > 0.0 and xray_texture.is_valid():
 		var rd_texture := RenderingServer.texture_get_rd_texture(xray_texture, false)
+		if rd_texture.is_valid():
+			return rd_texture
+	return RenderingServer.texture_get_rd_texture(RenderingServer.get_white_texture(), false)
+
+
+## The wireframe render as a RenderingDevice texture, read as stored: the
+## hidden viewport renders in HDR, so the depth it carries is linear. A white
+## pixel stands in while wireframe is off, when the shader never reads it.
+func _wireframe_rd_texture() -> RID:
+	if wireframe > 0.0 and wireframe_texture.is_valid():
+		var rd_texture := RenderingServer.texture_get_rd_texture(wireframe_texture, false)
 		if rd_texture.is_valid():
 			return rd_texture
 	return RenderingServer.texture_get_rd_texture(RenderingServer.get_white_texture(), false)

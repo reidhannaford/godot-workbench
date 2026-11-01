@@ -6,6 +6,10 @@
 // mode does. The scene's lights, materials, fog and post-processing never
 // reach it. Runs before the sky and the transparent pass, so the editor's
 // grid, gizmos and any see-through objects still draw on top.
+//
+// The same shader, with depth_export set, runs on the hidden wireframe
+// viewport instead, where it only copies the depth of the drawn mesh edges
+// into the colour buffer for the main pass to read.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -14,6 +18,7 @@ layout(set = 1, binding = 0) uniform sampler2D depth_texture;
 layout(set = 2, binding = 0) uniform sampler2D normal_roughness_texture;
 layout(set = 3, binding = 0) uniform sampler2D matcap_texture;
 layout(set = 4, binding = 0) uniform sampler2D xray_texture;
+layout(set = 5, binding = 0) uniform sampler2D wireframe_texture;
 
 layout(push_constant, std430) uniform Params {
 	vec2 raster_size;
@@ -29,6 +34,10 @@ layout(push_constant, std430) uniform Params {
 	float outline_width; // In pixels of this buffer, 1 or more.
 	float crease; // 1 also outlines sharp creases within a surface.
 	vec4 background_color; // Linear rgb; a unused.
+	float wireframe; // Opacity of the mesh edge lines, 0 off.
+	float depth_export; // 1 writes the depth into the colour buffer instead of shading: the wireframe helper viewport.
+	float wireframe_cos; // An edge is lined where the normals beside it differ by more than this cosine; 2 lines every edge.
+	float pad;
 } params;
 
 const vec3 LINE_COLOR = vec3(0.015);
@@ -236,6 +245,92 @@ vec3 xray_blend(ivec2 uv, vec3 front) {
 	return color;
 }
 
+// How much the surface distance changes over one pixel, taking the smaller
+// change of each axis's two sides so a silhouette on one side doesn't count.
+// A neighbour without geometry counts as a large change.
+float depth_slope(ivec2 uv, float dist) {
+	float side[4];
+	ivec2 offsets[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+	for (int i = 0; i < 4; i++) {
+		float depth = raw_depth(uv + offsets[i]);
+		side[i] = has_geometry(depth) ? abs(view_distance(depth) - dist) : 1.0e9;
+	}
+	return max(min(side[0], side[1]), min(side[2], side[3]));
+}
+
+// The wireframe render of the same view, as the depth export wrote it: r is
+// 1 where a mesh edge was drawn, g and b carry the edge's depth in two halves.
+bool wire_at(ivec2 uv, out float depth) {
+	vec4 w = texture(wireframe_texture, (vec2(uv) + 0.5) / params.raster_size);
+	depth = w.g + w.b / 1024.0;
+	return w.r > 0.5;
+}
+
+// Whether the surfaces meeting at a mesh edge pixel differ by at least the
+// threshold angle, from the largest normal difference between the pixel and
+// its neighbours on the same surface. A neighbour on another surface, or on
+// none, makes it a boundary edge, which always counts. Flat-shaded faces jump
+// across an edge; smooth-shaded ones barely change between pixels, so their
+// edges go first as the threshold rises.
+bool wire_sharp(ivec2 uv, float dist) {
+	if (params.wireframe_cos > 1.0) {
+		return true;
+	}
+	vec3 n_c = load_normal(uv);
+	float limit = max(dist * 0.02, 0.005);
+	for (int y = -1; y <= 1; y++) {
+		for (int x = -1; x <= 1; x++) {
+			if (x == 0 && y == 0) {
+				continue;
+			}
+			ivec2 at = uv + ivec2(x, y);
+			float depth = raw_depth(at);
+			if (!has_geometry(depth) || abs(view_distance(depth) - dist) > limit) {
+				return true;
+			}
+			if (dot(n_c, load_normal(at)) < params.wireframe_cos) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Mesh edges from the wireframe render, outline_width pixels wide and, like
+// the other lines, landing on the -x -y side of the edge. An edge is visible
+// where it is no farther than the surface under it, give or take the
+// surface's own slope across a pixel and a little depth precision; an edge
+// behind the surface is hidden, and only x-ray shows it. The angle threshold
+// applies to the visible edges, whose surfaces are in the normal buffer.
+void wireframe(ivec2 uv, out float visible, out float hidden) {
+	visible = 0.0;
+	hidden = 0.0;
+	int width = outline_width();
+	for (int y = 0; y < width; y++) {
+		for (int x = 0; x < width; x++) {
+			ivec2 at = clamp_uv(uv + ivec2(x, y));
+			float wire_depth;
+			if (!wire_at(at, wire_depth)) {
+				continue;
+			}
+			float depth = raw_depth(at);
+			if (!has_geometry(depth)) {
+				visible = 1.0;
+				continue;
+			}
+			float dist = view_distance(depth);
+			float tolerance = 0.002 * dist + 2.0 * depth_slope(at, dist);
+			if (view_distance(wire_depth) <= dist + tolerance) {
+				if (wire_sharp(at, dist)) {
+					visible = 1.0;
+				}
+			} else {
+				hidden = 1.0;
+			}
+		}
+	}
+}
+
 void main() {
 	ivec2 uv = ivec2(gl_GlobalInvocationID.xy);
 	if (uv.x >= size.x || uv.y >= size.y) {
@@ -244,6 +339,16 @@ void main() {
 
 	float depth = raw_depth(uv);
 	if (!has_geometry(depth)) {
+		return;
+	}
+
+	if (params.depth_export > 0.5) {
+		// The wireframe helper viewport: mark every pixel a mesh edge was
+		// drawn on and keep its depth, split into two halves so the 16-bit
+		// float colour buffer holds about 21 bits of it. Pixels without an
+		// edge keep the clear colour, and the sky draws over them.
+		float coarse = floor(depth * 1024.0) / 1024.0;
+		imageStore(color_image, uv, vec4(1.0, coarse, (depth - coarse) * 1024.0, 1.0));
 		return;
 	}
 
@@ -272,6 +377,17 @@ void main() {
 	}
 	if (params.xray > 0.0) {
 		color = xray_blend(uv, color);
+	}
+	if (params.wireframe > 0.0) {
+		float visible;
+		float hidden;
+		wireframe(uv, visible, hidden);
+		float line = visible;
+		if (params.xray > 0.0) {
+			// Hidden edges show through the front surface as much as it lets through.
+			line = max(line, hidden * (1.0 - params.xray));
+		}
+		color = mix(color, LINE_COLOR, line * params.wireframe);
 	}
 
 	imageStore(color_image, uv, vec4(color, 1.0));
