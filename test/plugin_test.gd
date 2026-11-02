@@ -7,6 +7,7 @@ extends SceneTree
 const WorkbenchController := preload("res://addons/workbench/workbench_controller.gd")
 const WorkbenchSettings := preload("res://addons/workbench/workbench_settings.gd")
 const WorkbenchEffect := preload("res://addons/workbench/workbench_effect.gd")
+const WorkbenchUpdater := preload("res://addons/workbench/workbench_updater.gd")
 
 var _failures: int = 0
 
@@ -173,6 +174,29 @@ func _run() -> void:
 				submenu.id_pressed.emit(100)
 				_check(settings.get_setting("workbench/matcap") == "res://addons/workbench/matcaps/clay.png" and settings.get_setting("workbench/shading") == 1, "picking a matcap while in studio lighting keeps both the matcap and the shading")
 			panel.hide()
+		_check(popup.get_item_index(11) >= 0 and popup.get_item_text(popup.get_item_index(11)) == "Check for Updates…", "the options menu has a Check for Updates… item")
+		_check(popup.get_item_index(12) >= 0 and popup.get_item_text(popup.get_item_index(12)) == "About Workbench…", "the options menu has an About Workbench… item")
+		popup.id_pressed.emit(12)
+		await process_frame
+		var about := EditorInterface.get_base_control().find_child("WorkbenchAbout", true, false) as AcceptDialog
+		_check(about != null and about.visible, "About Workbench… opens a dialog")
+		if about != null:
+			var labels := about.find_children("*", "RichTextLabel", true, false)
+			_check(labels.size() == 1 and (labels[0] as RichTextLabel).text.contains("github.com/reidhannaford/godot-workbench"), "the About dialog links to the repository")
+			about.hide()
+
+	_check(settings.has_setting("workbench/check_for_updates"), "the check_for_updates setting is registered")
+	var updater := EditorInterface.get_base_control().find_child("WorkbenchUpdater", true, false) as WorkbenchUpdater
+	_check(updater != null, "the updater is under the base control")
+	if updater != null:
+		var config := ConfigFile.new()
+		config.load("res://addons/workbench/plugin.cfg")
+		_check(updater.current_version == str(config.get_value("plugin", "version", "")), "the updater reads the version from plugin.cfg")
+		_check(not updater.has_update() and not updater.is_busy(), "headless, the updater has not checked")
+	_check(WorkbenchUpdater.compare_versions("1.3.1", "1.3.0") > 0, "1.3.1 is newer than 1.3.0")
+	_check(WorkbenchUpdater.compare_versions("v1.4", "1.4.0") == 0, "v1.4 is 1.4.0")
+	_check(WorkbenchUpdater.compare_versions("1.9.9", "2.0") < 0, "1.9.9 is older than 2.0")
+	_check(WorkbenchUpdater.compare_versions("1.10.0", "1.9.0") > 0, "versions compare by number, not by text")
 
 	print("FAILURES %d" % _failures)
 	quit(0 if _failures == 0 else 1)

@@ -60,8 +60,10 @@ The menu next to the toggle:
 | X-Ray | Front surfaces half transparent, geometry behind them ghosted. |
 | Bundled MatCaps | Clay, Normal, Contrast, Toon, Zebra, Wax or Chrome; switches to MatCap. |
 | Choose MatCap… | Pick an image from the project; switches to MatCap. |
+| Check for Updates… | Installs the latest release from GitHub if it is newer. A dot on the menu button means one is out. |
+| About Workbench… | Version, author, and where to report an issue. |
 
-Editor Settings > Workbench holds the rest: the outline width in points, the x-ray opacity, and the wireframe opacity and threshold. Changes there apply at once.
+Editor Settings > Workbench holds the rest: the outline width in points, the x-ray opacity, the wireframe opacity and threshold, and whether to look for updates when the editor starts. Changes there apply at once.
 
 Options are Editor Settings (`workbench/…`), so they follow you between projects. The toggle itself starts off every session.
 

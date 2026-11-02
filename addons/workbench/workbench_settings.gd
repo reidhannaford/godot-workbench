@@ -31,6 +31,9 @@ var wireframe_opacity: float = 1.0
 ## Degrees; 0 lines every edge.
 var wireframe_threshold: float = 0.0
 var matcap_path: String = DEFAULT_MATCAP
+## Look up the latest GitHub release when the editor starts, and show a dot
+## on the options menu if it is newer.
+var check_for_updates: bool = true
 
 
 func load() -> void:
@@ -47,6 +50,7 @@ func load() -> void:
 	wireframe_opacity = _read(settings, "wireframe_opacity", wireframe_opacity, TYPE_FLOAT, PROPERTY_HINT_RANGE, "0.1,1,0.05")
 	wireframe_threshold = _read(settings, "wireframe_threshold", wireframe_threshold, TYPE_FLOAT, PROPERTY_HINT_RANGE, "0,90,1")
 	matcap_path = _read(settings, "matcap", matcap_path, TYPE_STRING, PROPERTY_HINT_FILE, "*.png,*.jpg,*.jpeg,*.exr,*.webp")
+	check_for_updates = _read(settings, "check_for_updates", check_for_updates, TYPE_BOOL)
 
 
 func save() -> void:
@@ -63,6 +67,7 @@ func save() -> void:
 	settings.set_setting(PREFIX + "wireframe_opacity", wireframe_opacity)
 	settings.set_setting(PREFIX + "wireframe_threshold", wireframe_threshold)
 	settings.set_setting(PREFIX + "matcap", matcap_path)
+	settings.set_setting(PREFIX + "check_for_updates", check_for_updates)
 
 
 ## The matcap texture the settings name, or the bundled one if it won't load.

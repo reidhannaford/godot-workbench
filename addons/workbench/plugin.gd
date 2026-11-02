@@ -8,12 +8,14 @@ extends EditorPlugin
 const WorkbenchController := preload("workbench_controller.gd")
 const WorkbenchSettings := preload("workbench_settings.gd")
 const WorkbenchEffect := preload("workbench_effect.gd")
+const WorkbenchUpdater := preload("workbench_updater.gd")
 
 const SHORTCUT_PATH := "workbench/toggle"
 const XRAY_SHORTCUT_PATH := "workbench/toggle_xray"
 const WIREFRAME_SHORTCUT_PATH := "workbench/toggle_wireframe"
+const WEBSITE_URL := "https://reidhannaford.com"
 
-enum Item { STUDIO, MATCAP, FLAT, TEXTURE, CAVITY, OUTLINE, CHOOSE_MATCAP, XRAY, CREASE, WIREFRAME, WIREFRAME_OPTIONS }
+enum Item { STUDIO, MATCAP, FLAT, TEXTURE, CAVITY, OUTLINE, CHOOSE_MATCAP, XRAY, CREASE, WIREFRAME, WIREFRAME_OPTIONS, CHECK_UPDATES, ABOUT }
 ## Ids of the bundled matcaps in their submenu: this plus their index.
 const MATCAP_ID_BASE := 100
 
@@ -29,6 +31,13 @@ var _file_dialog: EditorFileDialog
 var _wireframe_panel: PopupPanel
 var _opacity_slider: HSlider
 var _threshold_slider: HSlider
+## Checks GitHub for a newer release and installs it. Lives under the base
+## control, not the toolbar, since it outlives this plugin instance while it
+## reloads the addon.
+var _updater: WorkbenchUpdater
+## The dialog a Check for Updates… press is reporting into, if one is open.
+var _update_notice: AcceptDialog
+var _about_dialog: AcceptDialog
 ## True while [method _save_settings] writes: EditorSettings emits
 ## settings_changed from inside each set_setting, and reloading the settings
 ## half-way through a save would overwrite the values not yet written.
@@ -68,6 +77,16 @@ func _enter_tree() -> void:
 	_update_tooltip()
 	add_control_to_container(CONTAINER_SPATIAL_EDITOR_MENU, _bar)
 	set_input_event_forwarding_always_enabled()
+
+	_updater = WorkbenchUpdater.new()
+	_updater.checked.connect(_on_update_checked)
+	_updater.failed.connect(_on_update_failed)
+	_updater.installed.connect(_on_update_installed)
+	EditorInterface.get_base_control().add_child(_updater)
+	_menu.draw.connect(_draw_update_dot)
+	# A headless editor (the tests) makes no network calls.
+	if _settings.check_for_updates and DisplayServer.get_name() != "headless":
+		_updater.check.call_deferred()
 	# Editor Settings > Workbench edits (the outline width, the x-ray
 	# opacity) take effect at once.
 	EditorInterface.get_editor_settings().settings_changed.connect(_on_settings_changed)
@@ -93,6 +112,14 @@ func _exit_tree() -> void:
 	_wireframe_panel = null
 	_opacity_slider = null
 	_threshold_slider = null
+	if _about_dialog != null:
+		_about_dialog.queue_free()
+	_about_dialog = null
+	# queue_free, not free: when the updater itself disabled the plugin to
+	# reload it, it is still running and re-enables it before the frame ends.
+	if _updater != null:
+		_updater.queue_free()
+	_updater = null
 	_controller = null
 
 
@@ -195,6 +222,9 @@ func _build_menu() -> void:
 	_matcap_menu.id_pressed.connect(_on_matcap_menu_pressed)
 	popup.add_submenu_node_item("Bundled MatCaps", _matcap_menu)
 	popup.add_item("Choose MatCap…", Item.CHOOSE_MATCAP)
+	popup.add_separator()
+	popup.add_item("Check for Updates…", Item.CHECK_UPDATES)
+	popup.add_item("About Workbench…", Item.ABOUT)
 
 
 ## Shows the current settings on the menu items; the menu may be open.
@@ -214,6 +244,27 @@ func _sync_menu() -> void:
 	for label: String in WorkbenchSettings.BUNDLED_MATCAPS:
 		_matcap_menu.set_item_checked(_matcap_menu.get_item_index(MATCAP_ID_BASE + index), _settings.matcap_path == WorkbenchSettings.BUNDLED_MATCAPS[label])
 		index += 1
+	_sync_update_state()
+
+
+## Shows whether a newer release is known: the dot on the menu button, its
+## tooltip, and the Check for Updates… item, which then offers the update.
+func _sync_update_state() -> void:
+	var update := _updater != null and _updater.has_update()
+	var popup := _menu.get_popup()
+	popup.set_item_text(popup.get_item_index(Item.CHECK_UPDATES), ("Update to Workbench %s" % _updater.latest_version) if update else "Check for Updates…")
+	_menu.tooltip_text = ("Workbench options\nWorkbench %s is available." % _updater.latest_version) if update else "Workbench options"
+	_menu.queue_redraw()
+
+
+## A small dot in the menu button's corner while an update is available.
+func _draw_update_dot() -> void:
+	if _updater == null or not _updater.has_update():
+		return
+	var scale := EditorInterface.get_editor_scale()
+	var radius := 2.5 * scale
+	var color := EditorInterface.get_editor_theme().get_color(&"warning_color", &"Editor")
+	_menu.draw_circle(Vector2(_menu.size.x - radius - 2.0 * scale, radius + 3.0 * scale), radius, color, true, -1.0, true)
 
 
 func _on_menu_pressed(id: int) -> void:
@@ -241,6 +292,12 @@ func _on_menu_pressed(id: int) -> void:
 			return
 		Item.WIREFRAME_OPTIONS:
 			_show_wireframe_options()
+			return
+		Item.CHECK_UPDATES:
+			_check_for_updates()
+			return
+		Item.ABOUT:
+			_show_about()
 			return
 	_save_settings()
 	_apply_settings()
@@ -373,3 +430,88 @@ func _update_tooltip() -> void:
 	if settings.has_shortcut(WIREFRAME_SHORTCUT_PATH):
 		wireframe_text = "\nWireframe: %s (%s)." % ["on" if _settings.wireframe else "off", settings.get_shortcut(WIREFRAME_SHORTCUT_PATH).get_as_text()]
 	_toggle.tooltip_text = "Workbench%s\n%s, %s colour.%s%s" % [shortcut_text, mode, "texture" if _settings.texture_color else "flat", xray_text, wireframe_text]
+
+
+## Check for Updates…: looks up the latest release and, if it is newer,
+## installs it, reporting into a dialog along the way. Once a check has found
+## an update, the item installs it straight away.
+func _check_for_updates() -> void:
+	if _updater.is_busy():
+		return
+	if _updater.has_update():
+		_set_update_notice("Downloading Workbench %s…" % _updater.latest_version)
+		_updater.install()
+	else:
+		_set_update_notice("Checking for updates…")
+		_updater.check()
+
+
+func _on_update_checked() -> void:
+	_sync_update_state()
+	if not is_instance_valid(_update_notice):
+		return
+	if _updater.has_update():
+		_set_update_notice("Downloading Workbench %s…" % _updater.latest_version)
+		_updater.install()
+	else:
+		_set_update_notice("Workbench %s is up to date." % _updater.current_version)
+
+
+func _on_update_failed(message: String) -> void:
+	if not is_instance_valid(_update_notice):
+		return
+	var dialog := _set_update_notice("Couldn't check for updates. %s\nThe releases are at %s." % [message, _updater.release_url])
+	dialog.add_button("Open Releases Page", true, "releases")
+	dialog.custom_action.connect(func(_action: StringName) -> void:
+		OS.shell_open(_updater.release_url)
+		dialog.hide())
+
+
+## The files are on disk; the updater reloads the plugin next, which frees
+## this instance, so the dialog is left to look after itself.
+func _on_update_installed(version: String) -> void:
+	_set_update_notice("Workbench updated to %s." % version)
+
+
+## Replaces the open progress dialog, if any, with one saying [param text].
+func _set_update_notice(text: String) -> AcceptDialog:
+	if is_instance_valid(_update_notice):
+		_update_notice.hide()
+	var dialog := AcceptDialog.new()
+	dialog.title = "Workbench"
+	dialog.dialog_text = text
+	EditorInterface.get_base_control().add_child(dialog)
+	dialog.popup_centered()
+	# One-shot: it frees itself when closed, so it survives a plugin reload.
+	dialog.visibility_changed.connect(func() -> void:
+		if not dialog.visible:
+			dialog.queue_free())
+	_update_notice = dialog
+	return dialog
+
+
+func _show_about() -> void:
+	if _about_dialog == null:
+		_about_dialog = AcceptDialog.new()
+		_about_dialog.name = "WorkbenchAbout"
+		_about_dialog.title = "About Workbench"
+		var text := RichTextLabel.new()
+		text.bbcode_enabled = true
+		text.fit_content = true
+		text.scroll_active = false
+		text.custom_minimum_size = Vector2(520.0, 0.0) * EditorInterface.get_editor_scale()
+		text.text = "\n".join([
+			"[b]Workbench[/b] %s" % _updater.current_version,
+			"Blender's Workbench shading for Godot's 3D editor viewport.",
+			"",
+			"Made by Reid Hannaford: [url=%s]%s[/url]" % [WEBSITE_URL, WEBSITE_URL.trim_prefix("https://")],
+			"Source, releases and changelog: [url=%s]%s[/url]" % [WorkbenchUpdater.REPO_URL, WorkbenchUpdater.REPO_URL.trim_prefix("https://")],
+			"Something wrong or missing? [url=%s/issues]Report an issue[/url] on GitHub and I'll have a look." % WorkbenchUpdater.REPO_URL,
+			"",
+			"MIT licence.",
+		])
+		text.meta_clicked.connect(func(meta: Variant) -> void:
+			OS.shell_open(str(meta)))
+		_about_dialog.add_child(text)
+		EditorInterface.get_base_control().add_child(_about_dialog)
+	_about_dialog.popup_centered()
