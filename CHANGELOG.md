@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0, 2026-11-02
 
 - **About Workbench…** and **Check for Updates…** at the bottom of the options menu. The check looks up the latest GitHub release and, if it is newer, downloads it, installs it over `addons/workbench/` and reloads the plugin. The editor also looks it up on start and marks the menu button with a small dot when a newer release is out; `workbench/check_for_updates` in Editor Settings turns that off.
 - **Wireframe**: a line along every mesh edge, as Blender's Wireframe overlay draws, in the options menu and on Alt+Shift+W by default (`workbench/toggle_wireframe`). **Wireframe Options…** opens Blender's two sliders: the lines' opacity, and an angle threshold that keeps only the edges where the surfaces either side meet at that angle or more, so the diagonals across flat quads go first; both are also `workbench/wireframe_opacity` and `workbench/wireframe_threshold` in Editor Settings. The width follows `workbench/outline_width`. Only the edges in front are drawn. The edges come from a second hidden render per editor viewport, in the editor's Wireframe debug draw, whose depth is exported and tested against the solid surfaces; with X-ray on, the hidden edges show through as much as the front surface does. Godot draws every triangle edge, so quads show their diagonals.
